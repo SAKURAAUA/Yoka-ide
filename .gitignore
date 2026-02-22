@@ -1,0 +1,2 @@
+# Ignore Windows reserved files that can't be tracked
+nul
