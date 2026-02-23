@@ -1,2 +1,19 @@
 # Ignore Windows reserved files that can't be tracked
 nul
+
+# Local ignores for workspace
+# Node modules across projects
+**/node_modules/
+
+# Build/dist artifacts (large binaries) - tracked via LFS instead
+**/opencode-ide/dist/
+
+# Unpacked resources and temp build dirs
+**/opencode-ide/dist/**/app.asar.unpacked/
+
+# Temp and diagnostic files
+**/.tmp-*
+**/*.log
+
+# Local env files (do not commit secrets)
+.env.local
