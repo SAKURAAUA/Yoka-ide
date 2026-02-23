@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', { dirPath }),
     readFile: (filePath, options) => ipcRenderer.invoke('fs:readFile', { filePath, options }),
     writeFile: (filePath, content, options) => ipcRenderer.invoke('fs:writeFile', { filePath, content, options }),
+    exists: (filePath) => ipcRenderer.invoke('fs:exists', { filePath }),
   },
 
   // Project management

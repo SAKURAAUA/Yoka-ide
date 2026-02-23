@@ -42,9 +42,12 @@ interface AppState extends AIStoreState, EditorStore {
   separatePreviewBounds: { x: number; y: number; width: number; height: number } | null;
   
   // === Chat ===
+  conversationGroups: Array<{ id: string; title: string; projectId: string; createdAt: number; updatedAt: number }>;
   activeConversationId: string;
-  conversations: Array<{ id: string; title: string; projectId: string }>;
+  conversations: Array<{ id: string; title: string; projectId: string; groupId: string; createdAt: number; updatedAt: number }>;
   conversationMessages: Record<string, Message[]>;
+  conversationSummaries: Record<string, { summary: string; updatedAt: number; sourceCount: number }>;
+  conversationGroupMemories: Record<string, { summary: string; updatedAt: number; sourceConversationId?: string }>;
   messages: Message[];
   imageAttachments: ImageAttachment[];
   isLoading: boolean;
@@ -99,7 +102,10 @@ interface AppState extends AIStoreState, EditorStore {
   addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => void;
   clearMessages: () => void;
   setActiveConversation: (conversationId: string) => void;
-  upsertConversation: (conversation: { id: string; title: string; projectId: string }) => void;
+  upsertConversationGroup: (group: { id: string; title: string; projectId: string }) => void;
+  upsertConversation: (conversation: { id: string; title: string; projectId: string; groupId: string }) => void;
+  upsertConversationSummary: (conversationId: string, summary: string, sourceCount?: number) => void;
+  upsertConversationGroupMemory: (projectId: string, summary: string, sourceConversationId?: string) => void;
   addImageAttachment: (image: Omit<ImageAttachment, 'id'>) => void;
   removeImageAttachment: (id: string) => void;
   clearImageAttachments: () => void;
@@ -125,6 +131,29 @@ interface AppState extends AIStoreState, EditorStore {
 
 // Check if we're in Electron environment
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+
+function createDefaultGroup(projectId: string) {
+  const now = Date.now();
+  return {
+    id: `cg-${projectId}-default`,
+    title: '默认对话组',
+    projectId,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function createDefaultConversation(projectId: string, groupId: string) {
+  const now = Date.now();
+  return {
+    id: `c-${projectId}-default`,
+    title: '对话 1',
+    projectId,
+    groupId,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -157,12 +186,17 @@ export const useAppStore = create<AppState>()(
        separatePreviewBounds: null,
       
       activeConversationId: 'c-proj1-default',
+      conversationGroups: [
+        createDefaultGroup('proj1'),
+      ],
       conversations: [
-        { id: 'c-proj1-default', title: '对话 1', projectId: 'proj1' },
+        createDefaultConversation('proj1', 'cg-proj1-default'),
       ],
       conversationMessages: {
         'c-proj1-default': [],
       },
+      conversationSummaries: {},
+      conversationGroupMemories: {},
       messages: [],
       imageAttachments: [],
       isLoading: false,
@@ -186,7 +220,31 @@ export const useAppStore = create<AppState>()(
       // === Actions ===
       setActiveTab: (tab) => set({ activeTab: tab }),
       setSidebarWidth: (width) => set({ sidebarWidth: width }),
-      setCurrentProject: (projectId) => set({ currentProject: projectId }),
+      setCurrentProject: (projectId) => set((state) => {
+        const existingGroups = state.conversationGroups.filter((group) => group.projectId === projectId);
+        const nextGroups = existingGroups.length > 0
+          ? state.conversationGroups
+          : [...state.conversationGroups, createDefaultGroup(projectId)];
+
+        const ensuredGroup = existingGroups[0] || nextGroups.find((group) => group.projectId === projectId)!;
+        const projectConversations = state.conversations.filter((conversation) => conversation.projectId === projectId);
+        let nextConversations = state.conversations;
+
+        if (projectConversations.length === 0) {
+          nextConversations = [...state.conversations, createDefaultConversation(projectId, ensuredGroup.id)];
+        }
+
+        const nextActiveConversationId =
+          nextConversations.find((conversation) => conversation.projectId === projectId)?.id || state.activeConversationId;
+
+        return {
+          currentProject: projectId,
+          conversationGroups: nextGroups,
+          conversations: nextConversations,
+          activeConversationId: nextActiveConversationId,
+          messages: state.conversationMessages[nextActiveConversationId] || [],
+        };
+      }),
       
       // Window actions with Electron integration
       createWindow: async (type, options = {}) => {
@@ -347,8 +405,14 @@ export const useAppStore = create<AppState>()(
         set((state) => {
           const activeConversationId = state.activeConversationId;
           const current = state.conversationMessages[activeConversationId] || [];
+          const now = Date.now();
           return {
             messages: [...current, newMessage],
+            conversations: state.conversations.map((conversation) =>
+              conversation.id === activeConversationId
+                ? { ...conversation, updatedAt: now }
+                : conversation
+            ),
             conversationMessages: {
               ...state.conversationMessages,
               [activeConversationId]: [...current, newMessage],
@@ -370,17 +434,66 @@ export const useAppStore = create<AppState>()(
         messages: state.conversationMessages[conversationId] || [],
       })),
 
-      upsertConversation: (conversation) => set((state) => {
-        const exists = state.conversations.some((c) => c.id === conversation.id);
+      upsertConversationGroup: (group) => set((state) => {
+        const now = Date.now();
+        const exists = state.conversationGroups.some((item) => item.id === group.id);
         return {
+          conversationGroups: exists
+            ? state.conversationGroups.map((item) =>
+                item.id === group.id
+                  ? { ...item, ...group, updatedAt: now }
+                  : item
+              )
+            : [...state.conversationGroups, { ...group, createdAt: now, updatedAt: now }],
+        };
+      }),
+
+      upsertConversation: (conversation) => set((state) => {
+        const now = Date.now();
+        const exists = state.conversations.some((c) => c.id === conversation.id);
+        const hasGroup = state.conversationGroups.some((group) => group.id === conversation.groupId);
+        const nextGroups = hasGroup
+          ? state.conversationGroups
+          : [...state.conversationGroups, {
+              id: conversation.groupId,
+              title: '默认对话组',
+              projectId: conversation.projectId,
+              createdAt: now,
+              updatedAt: now,
+            }];
+
+        return {
+          conversationGroups: nextGroups,
           conversations: exists
-            ? state.conversations.map((c) => (c.id === conversation.id ? conversation : c))
-            : [...state.conversations, conversation],
+            ? state.conversations.map((c) => (c.id === conversation.id ? { ...c, ...conversation, updatedAt: now } : c))
+            : [...state.conversations, { ...conversation, createdAt: now, updatedAt: now }],
           conversationMessages: state.conversationMessages[conversation.id]
             ? state.conversationMessages
             : { ...state.conversationMessages, [conversation.id]: [] },
         };
       }),
+
+      upsertConversationSummary: (conversationId, summary, sourceCount = 0) => set((state) => ({
+        conversationSummaries: {
+          ...state.conversationSummaries,
+          [conversationId]: {
+            summary,
+            updatedAt: Date.now(),
+            sourceCount,
+          },
+        },
+      })),
+
+      upsertConversationGroupMemory: (projectId, summary, sourceConversationId) => set((state) => ({
+        conversationGroupMemories: {
+          ...state.conversationGroupMemories,
+          [projectId]: {
+            summary,
+            updatedAt: Date.now(),
+            ...(sourceConversationId ? { sourceConversationId } : {}),
+          },
+        },
+      })),
       
       addImageAttachment: (image) => {
         const newImage: ImageAttachment = {
@@ -520,6 +633,13 @@ export const useAppStore = create<AppState>()(
         activeTab: state.activeTab,
         sidebarWidth: state.sidebarWidth,
         layoutMode: state.layoutMode,
+        currentProject: state.currentProject,
+        conversationGroups: state.conversationGroups,
+        conversations: state.conversations,
+        activeConversationId: state.activeConversationId,
+        conversationMessages: state.conversationMessages,
+        conversationSummaries: state.conversationSummaries,
+        conversationGroupMemories: state.conversationGroupMemories,
       }),
     }
   )

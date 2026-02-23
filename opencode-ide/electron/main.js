@@ -3456,6 +3456,56 @@ ipcMain.on('cancel-always-transparent', () => {
   disableAlwaysTransparent();
 });
 
+// File System IPC Handlers
+ipcMain.handle('fs:readFile', async (event, { filePath, options = {} }) => {
+  appendAILog('info', 'fs.readFile', 'reading file', { filePath, encoding: options.encoding });
+  try {
+    const content = fs.readFileSync(filePath, options.encoding || 'utf-8');
+    appendAILog('info', 'fs.readFile', 'file read success', { filePath, size: content.length });
+    return { ok: true, content };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Read failed';
+    appendAILog('error', 'fs.readFile', 'file read failed', { filePath, message });
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('fs:writeFile', async (event, { filePath, content, options = {} }) => {
+  appendAILog('info', 'fs.writeFile', 'writing file', { filePath, size: content?.length });
+  try {
+    fs.writeFileSync(filePath, content, options.encoding || 'utf-8');
+    appendAILog('info', 'fs.writeFile', 'file write success', { filePath });
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Write failed';
+    appendAILog('error', 'fs.writeFile', 'file write failed', { filePath, message });
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('fs:exists', async (event, { filePath }) => {
+  const exists = fs.existsSync(filePath);
+  return { ok: true, exists };
+});
+
+ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
+  appendAILog('info', 'fs.readDir', 'reading directory', { dirPath });
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const files = entries.map(entry => ({
+      name: entry.name,
+      isDirectory: entry.isDirectory(),
+      isFile: entry.isFile(),
+    }));
+    appendAILog('info', 'fs.readDir', 'directory read success', { dirPath, count: files.length });
+    return { ok: true, files };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Read dir failed';
+    appendAILog('error', 'fs.readDir', 'directory read failed', { dirPath, message });
+    return { ok: false, error: message, files: [] };
+  }
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();

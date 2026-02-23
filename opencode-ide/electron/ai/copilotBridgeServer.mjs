@@ -378,6 +378,7 @@ async function sendMessageStream(requestId, inputToken, messages, options = {}) 
   let offAny = null;
   let offDelta = null;
   let offMessage = null;
+  let heartbeatTimer = null;
 
   try {
     offAny = session.on((event) => {
@@ -402,11 +403,29 @@ async function sendMessageStream(requestId, inputToken, messages, options = {}) 
       fullResponse = event?.data?.content || fullResponse;
     });
 
+    writeEvent(requestId, 'ai:operation', {
+      eventType: 'session.progress',
+      label: '思考中',
+      detail: '等待模型返回中…',
+      state: 'running',
+    });
+
+    const heartbeatStart = Date.now();
+    heartbeatTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - heartbeatStart) / 1000);
+      writeEvent(requestId, 'ai:operation', {
+        eventType: 'session.heartbeat',
+        label: '思考中',
+        detail: `已运行 ${elapsedSec}s`,
+        state: 'running',
+      });
+    }, 12000);
+
     const finalMessage = await session.sendAndWait({
       prompt,
       attachments,
       mode: 'immediate',
-    }, 180000);
+    }, 600000);
 
     messageId = finalMessage?.data?.messageId || null;
     if (finalMessage?.data?.content) {
@@ -426,6 +445,10 @@ async function sendMessageStream(requestId, inputToken, messages, options = {}) 
     writeEvent(requestId, 'ai:stream:error', { message });
     throw error;
   } finally {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
     if (typeof offDelta === 'function') offDelta();
     if (typeof offMessage === 'function') offMessage();
     if (typeof offAny === 'function') offAny();

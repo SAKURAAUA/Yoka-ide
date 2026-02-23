@@ -101,6 +101,67 @@ function extractTodosFromText(text: string): TodoItem[] {
   return result;
 }
 
+function mergeTodos(prev: TodoItem[], next: TodoItem[]): TodoItem[] {
+  if (next.length === 0) return prev;
+
+  const normalize = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase();
+  const byText = new Map(prev.map((item) => [normalize(item.text), item]));
+
+  for (const item of next) {
+    const key = normalize(item.text);
+    const existing = byText.get(key);
+    if (!existing) {
+      byText.set(key, item);
+      continue;
+    }
+    byText.set(key, {
+      ...existing,
+      done: existing.done || item.done,
+    });
+  }
+
+  return Array.from(byText.values()).slice(0, 40);
+}
+
+function summarizeMessagesForMemory(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  limit = 10
+): string {
+  const lines = messages
+    .map((msg) => {
+      const content = (msg.content || '').replace(/\s+/g, ' ').trim();
+      if (!content) return '';
+      const short = content.length > 140 ? `${content.slice(0, 139)}…` : content;
+      return `${msg.role === 'user' ? '用户' : '助手'}：${short}`;
+    })
+    .filter(Boolean);
+
+  if (lines.length === 0) return '';
+  return lines.slice(-limit).map((line, index) => `${index + 1}. ${line}`).join('\n');
+}
+
+function mergeMemorySummary(previous: string, next: string, maxLines = 14, maxChars = 1800): string {
+  const prevLines = previous.split('\n').map((line) => line.trim()).filter(Boolean);
+  const nextLines = next.split('\n').map((line) => line.trim()).filter(Boolean);
+  const merged = [...prevLines, ...nextLines];
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const line of merged) {
+    const normalized = line.replace(/\s+/g, ' ').toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(line);
+  }
+
+  const limited = deduped.slice(-maxLines);
+  const joined = limited.join('\n');
+  if (joined.length <= maxChars) {
+    return joined;
+  }
+  return joined.slice(joined.length - maxChars);
+}
+
 function buildAgentSystemPrompt(agent: string) {
   if (agent === 'planner') {
     return '你是规划智能体。请优先产出结构化步骤、依赖关系和风险提示。';
@@ -122,6 +183,8 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
   const [todoCollapsed, setTodoCollapsed] = useState(false);
   const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
   const [operations, setOperations] = useState<OperationItem[]>([]);
+  const [showReasoning, setShowReasoning] = useState(false);
+  const [reasoningTimeline, setReasoningTimeline] = useState<Array<{ id: string; time: number; label: string; detail?: string }>>([]);
   const [backendHint, setBackendHint] = useState<string>('后端检查中...');
   const [models, setModels] = useState<AIModelInfo[]>([]);
   const [streamPreview, setStreamPreview] = useState('');
@@ -129,6 +192,13 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { 
     addMessage, 
+    messages,
+    activeConversationId,
+    conversations,
+    conversationSummaries,
+    conversationGroupMemories,
+    upsertConversationSummary,
+    upsertConversationGroupMemory,
     imageAttachments, 
     addImageAttachment, 
     removeImageAttachment, 
@@ -137,6 +207,9 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
     setIsLoading,
     activeBackend
   } = useAppStore();
+
+  const CONTEXT_MESSAGE_LIMIT = 16;
+  const CONTEXT_COMPRESSION_TRIGGER = 24;
   
   // 竖条模式时隐藏提示
   const hidePlaceholder = isDocked && (dockPosition === 'left' || dockPosition === 'right');
@@ -170,6 +243,22 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
         state: normalizedState,
       };
       return [item, ...prev].slice(0, 12);
+    });
+  };
+
+  const appendReasoningEvent = (next: { label: string; detail?: string }) => {
+    setReasoningTimeline((prev) => {
+      const latest = prev[0];
+      if (latest && latest.label === next.label && latest.detail === next.detail) {
+        return prev;
+      }
+      const item = {
+        id: `reason-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        time: Date.now(),
+        label: next.label,
+        detail: next.detail,
+      };
+      return [item, ...prev].slice(0, 40);
     });
   };
 
@@ -294,7 +383,11 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
     const onFocus = () => {
       loadModels();
     };
+    const onAuthUpdated = () => {
+      loadModels();
+    };
     window.addEventListener('focus', onFocus);
+    window.addEventListener('ai-auth-updated', onAuthUpdated as EventListener);
 
     const timer = window.setInterval(() => {
       loadModels();
@@ -302,6 +395,7 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
 
     return () => {
       window.removeEventListener('focus', onFocus);
+      window.removeEventListener('ai-auth-updated', onAuthUpdated as EventListener);
       window.clearInterval(timer);
     };
   }, [activeBackend]);
@@ -322,10 +416,12 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
     clearImageAttachments();
     setIsLoading(true);
     setStreamPreview('');
+    setReasoningTimeline([]);
     streamBufferRef.current = '';
 
     let hasStreamError = false;
     let streamErrorMessage = '';
+    let hasStreamEnd = false;
     
     try {
       if (!window.electronAPI?.ai) {
@@ -395,6 +491,10 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
           streamErrorMessage = error?.message || '流式响应异常';
         });
 
+        window.electronAPI.ai.onStreamEnd(() => {
+          hasStreamEnd = true;
+        });
+
         if (window.electronAPI.ai.onOperation) {
           window.electronAPI.ai.onOperation((operation: AIStreamOperation) => {
             const label = typeof operation?.label === 'string' && operation.label.trim()
@@ -408,6 +508,14 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
               : 'running';
 
             appendOperationEvent({ label, detail, state });
+
+            const eventType = typeof operation?.eventType === 'string' ? operation.eventType : '';
+            if (
+              /reasoning|intent|turn_start|turn_end|heartbeat|tool\./i.test(eventType) ||
+              /思考|工具|处理中|回复中/.test(label)
+            ) {
+              appendReasoningEvent({ label, detail });
+            }
           });
         }
       }
@@ -417,7 +525,29 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
         .map((todo, idx) => `${idx + 1}. ${todo.text}`)
         .join('\n');
 
-      const systemPrompt = `${buildAgentSystemPrompt(selectedAgent)}${todoContext ? `\n\n当前待办:\n${todoContext}` : ''}`;
+      const activeConversation = conversations.find((conv) => conv.id === activeConversationId);
+      const currentProjectId = activeConversation?.projectId || 'default-project';
+      const storedConversationMemory = conversationSummaries[activeConversationId]?.summary || '';
+      const storedGroupMemory = conversationGroupMemories[currentProjectId]?.summary || '';
+
+      const overflowMessages = messages.length > CONTEXT_COMPRESSION_TRIGGER
+        ? messages.slice(0, messages.length - CONTEXT_MESSAGE_LIMIT)
+        : [];
+      const overflowSummary = summarizeMessagesForMemory(
+        overflowMessages.map((msg) => ({ role: msg.role as 'user' | 'assistant', content: msg.content })),
+        8
+      );
+
+      const sessionMemory = mergeMemorySummary(storedConversationMemory, overflowSummary);
+      if (sessionMemory && sessionMemory !== storedConversationMemory) {
+        upsertConversationSummary(activeConversationId, sessionMemory, messages.length);
+      }
+
+      const systemPrompt = `${buildAgentSystemPrompt(selectedAgent)}${todoContext ? `\n\n当前待办:\n${todoContext}` : ''}${storedGroupMemory ? `\n\n对话组记忆（跨会话）：\n${storedGroupMemory}` : ''}${sessionMemory ? `\n\n会话简要记忆（压缩）：\n${sessionMemory}` : ''}`;
+
+      const historyMessages = messages
+        .slice(-CONTEXT_MESSAGE_LIMIT)
+        .map((msg) => ({ role: msg.role as 'user' | 'assistant', content: msg.content }));
 
       const request = {
         messages: [
@@ -425,6 +555,7 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
             role: 'system' as const,
             content: systemPrompt,
           },
+          ...historyMessages,
           {
             role: 'user' as const,
             content: userMessage,
@@ -454,9 +585,25 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
           role: 'assistant',
           content: streamedContent,
         });
+
+        const turnSummary = summarizeMessagesForMemory([
+          { role: 'user', content: userMessage },
+          { role: 'assistant', content: streamedContent },
+        ], 4);
+        upsertConversationSummary(
+          activeConversationId,
+          mergeMemorySummary(conversationSummaries[activeConversationId]?.summary || '', turnSummary),
+          messages.length + 2
+        );
+        upsertConversationGroupMemory(
+          currentProjectId,
+          mergeMemorySummary(conversationGroupMemories[currentProjectId]?.summary || '', turnSummary, 12, 1200),
+          activeConversationId
+        );
+
         const extractedFromStream = extractTodosFromText(streamedContent);
         if (extractedFromStream.length > 0) {
-          setTodoItems(extractedFromStream);
+          setTodoItems((prev) => mergeTodos(prev, extractedFromStream));
         }
         setStreamPreview('');
         return;
@@ -472,9 +619,25 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
         ? streamBufferRef.current
         : result.response?.message?.content ?? '';
 
+      const turnSummary = summarizeMessagesForMemory([
+        { role: 'user', content: userMessage },
+        { role: 'assistant', content: assistantContent },
+      ], 4);
+
+      upsertConversationSummary(
+        activeConversationId,
+        mergeMemorySummary(conversationSummaries[activeConversationId]?.summary || '', turnSummary),
+        messages.length + 2
+      );
+      upsertConversationGroupMemory(
+        currentProjectId,
+        mergeMemorySummary(conversationGroupMemories[currentProjectId]?.summary || '', turnSummary, 12, 1200),
+        activeConversationId
+      );
+
       const extractedTodos = extractTodosFromText(assistantContent);
       if (extractedTodos.length > 0) {
-        setTodoItems(extractedTodos);
+        setTodoItems((prev) => mergeTodos(prev, extractedTodos));
       }
 
       addMessage({
@@ -483,7 +646,48 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
       });
       setStreamPreview('');
     } catch (error) {
-      const message = error instanceof Error ? error.message : '处理请求时出错，请重试。';
+      const rawMessage = error instanceof Error ? error.message : '处理请求时出错，请重试。';
+      const isStreamTimeout = /Bridge request timeout:\s*sendMessageStream/i.test(rawMessage);
+      const streamedContent = streamBufferRef.current.trim();
+
+      if (isStreamTimeout && streamedContent) {
+        const opId = pushOperation('请求超时，已保留流式内容');
+        updateOperation(opId, { state: 'success', detail: '主请求超时，但已收到部分回答' });
+        addMessage({
+          role: 'assistant',
+          content: streamedContent,
+        });
+
+        const activeConversation = conversations.find((conv) => conv.id === activeConversationId);
+        const currentProjectId = activeConversation?.projectId || 'default-project';
+        const turnSummary = summarizeMessagesForMemory([
+          { role: 'user', content: userMessage },
+          { role: 'assistant', content: streamedContent },
+        ], 4);
+        upsertConversationSummary(
+          activeConversationId,
+          mergeMemorySummary(conversationSummaries[activeConversationId]?.summary || '', turnSummary),
+          messages.length + 2
+        );
+        upsertConversationGroupMemory(
+          currentProjectId,
+          mergeMemorySummary(conversationGroupMemories[currentProjectId]?.summary || '', turnSummary, 12, 1200),
+          activeConversationId
+        );
+
+        const extractedTodos = extractTodosFromText(streamedContent);
+        if (extractedTodos.length > 0) {
+          setTodoItems((prev) => mergeTodos(prev, extractedTodos));
+        }
+        setStreamPreview('');
+        return;
+      }
+
+      const message = isStreamTimeout
+        ? hasStreamEnd
+          ? '请求结束确认超时，请重试一次。'
+          : '请求超时：模型思考时间较长，请重试或缩短问题范围。'
+        : rawMessage;
       const opId = pushOperation('请求失败');
       updateOperation(opId, { state: 'error', detail: message });
       addMessage({
@@ -625,9 +829,17 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
             </div>
 
             <div className="rounded border border-gray-200 bg-gray-50 px-2 py-1.5">
-              <div className="text-xs text-gray-700 inline-flex items-center gap-1">
-                <Bot size={12} />
-                操作提示
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-gray-700 inline-flex items-center gap-1">
+                  <Bot size={12} />
+                  操作提示
+                </div>
+                <button
+                  className="text-[11px] text-blue-600 hover:text-blue-700"
+                  onClick={() => setShowReasoning((prev) => !prev)}
+                >
+                  {showReasoning ? '收起思考过程' : '显示思考过程'}
+                </button>
               </div>
               <div className="mt-1 space-y-1 max-h-28 overflow-auto">
                 <div className="text-[11px] text-gray-500">{backendHint}</div>
@@ -649,6 +861,21 @@ export function ChatInputPanel({ isDocked, dockPosition }: InputPanelProps = {})
                   ))
                 )}
               </div>
+
+              {showReasoning && (
+                <div className="mt-2 border-t border-gray-200 pt-2 max-h-28 overflow-auto space-y-1">
+                  {reasoningTimeline.length === 0 ? (
+                    <div className="text-[11px] text-gray-400">暂无思考过程事件</div>
+                  ) : (
+                    reasoningTimeline.map((item) => (
+                      <div key={item.id} className="text-[11px] text-gray-600">
+                        <span className="text-gray-400">[{new Date(item.time).toLocaleTimeString()}]</span>{' '}
+                        {item.label}{item.detail ? ` · ${item.detail}` : ''}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
