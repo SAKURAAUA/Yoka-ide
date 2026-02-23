@@ -1,0 +1,3 @@
+@echo off
+echo 正在启动 Browser MCP Server...
+node server.js

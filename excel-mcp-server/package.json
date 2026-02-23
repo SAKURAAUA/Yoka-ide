@@ -1,0 +1,20 @@
+{
+  "name": "excel-mcp-server",
+  "version": "1.0.0",
+  "description": "ExcelMCP Server for GitHub Copilot integration",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "xlsx": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "@types/node": "latest"
+  }
+}

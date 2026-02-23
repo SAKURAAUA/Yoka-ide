@@ -1,0 +1,12 @@
+{
+  "modelContextProtocol": {
+    "servers": {
+      "excelMCP": {
+        "command": "node",
+        "args": [
+          "d:\\yoka open IDE\\excel-mcp-server\\server.js"
+        ]
+      }
+    }
+  }
+}

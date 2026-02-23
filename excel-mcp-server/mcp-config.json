@@ -1,0 +1,21 @@
+{
+  "modelContextProtocol": {
+    "servers": {
+      "excelMCP": {
+        "command": "node",
+        "args": [
+          "${workspaceFolder}/excel-mcp-server/server.js"
+        ],
+        "env": {
+          "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+        }
+      },
+      "browserMCP": {
+        "command": "node",
+        "args": [
+          "${workspaceFolder}/browser-mcp-server/server.js"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+opencode-ide/dist/** filter=lfs diff=lfs merge=lfs -text
